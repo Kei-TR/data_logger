@@ -14,8 +14,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # v1.0 2025/09/08 作成
+# v1.1 2025/10/22 修正：サンプリングレートの検出方法を修正(GL800対応)
 
-debug = True # Trueならメール送信しない
+debug = False # Trueならメール送信しない
 
 #logger_server_dic = {'GL840-02':'172.30.113.89','Local':'192.168.151.154','test':'192.168.151.111'}
 #logger_server_dic = {'GL840-02':'172.30.113.89','GL840-01':'172.30.113.97'}
