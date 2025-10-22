@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 # v1.0 2025/09/08 作成
 
-debug = False # Trueならメール送信しない
+debug = True # Trueならメール送信しない
 
 #logger_server_dic = {'GL840-02':'172.30.113.89','Local':'192.168.151.154','test':'192.168.151.111'}
 #logger_server_dic = {'GL840-02':'172.30.113.89','GL840-01':'172.30.113.97'}
@@ -28,7 +28,7 @@ if not debug:
         'GL900-01':'172.30.113.95','GL900-02':'172.30.113.96'
     }    
 else: # デバッグ用
-    logger_server_dic = {'test':'192.168.151.111'}
+    logger_server_dic = {'GL800-02':'172.30.113.93','GL840-02':'172.30.113.89'}
     # logger_server_dic = {
     #     'GL840-01':'172.30.113.97','GL840-02':'172.30.113.89','GL840-03':'172.30.113.91',
     #     'GL800-01':'172.30.113.92','GL800-02':'172.30.113.93','GL800-03':'172.30.113.94',
@@ -83,9 +83,10 @@ def get_ftp_file_size(ftp, filename):
 # 関数：最新のログファイルパスを取得
 def get_latest_log_path(ftp):
 
-    # 親フォルダ名を検出(/SD2 or /USB1)    
+    # 親フォルダ名を検出(/SD2 or /USB1)
     parent_dir = get_available_parent_dir(ftp)
     if not parent_dir:
+        print(f"WARNING -> /SD2 or /USB1 not found in FTP server")
         return None
 
     # /SD2 配下のフォルダ一覧を取得
@@ -125,13 +126,13 @@ def backup_log(logger_name):
     except (TimeoutError, ConnectionRefusedError):
         print(f"ERROR -> Failed to connect to FTP server: {logger_server_dic.get(logger_name)}")
         #write_error_log(f'backup_log({logger_name})', f'Failed to connect to FTP server: {logger_server_dic.get(logger_name)}')
-        return
+        return False
     except Exception as e:
         print("ERROR: "+str(e))
         print("TYPE: "+str(type(e)))
         print(f'MESSAGE:\n----------\n{traceback.format_exc()}----------')
         write_error_log(f'backup_log({logger_name})', traceback.format_exc())
-        return
+        return False
 
     # FTP側のパス・ファイル名を取得
     copying_file_path = get_latest_log_path(ftp) # FTP側のパス(最新のファイル)
@@ -142,7 +143,7 @@ def backup_log(logger_name):
             ftp.quit()
         except ConnectionResetError:
             pass
-        return
+        return False
     file_name = os.path.basename(copying_file_path) # コピーするファイル名
 
     # ローカル側のパスを指定
@@ -176,6 +177,8 @@ def backup_log(logger_name):
         ftp.quit()
     except ConnectionResetError:
         pass
+
+    return True
 
 # 関数：jsonファイルをロード
 def load_json(path):
@@ -213,6 +216,32 @@ def find_max_cycle_time(json_dict):
     #             if isinstance(val, dict) and "max" in val:
     #                 max_values.append(val["max"])
     # return max(max_values) if max_values else 0
+
+# 関数：CSVヘッダーからサンプリング間隔(秒)を取得
+def get_sampling_interval_from_header(path):
+    try:
+        with open(path, encoding="cp932") as f:
+            for i, line in enumerate(f):
+                if i > 50:  # 最初の50行だけチェック
+                    break
+                if "測定間隔" in line:
+                    # 例: "測定間隔,500ms" or "測定間隔,10s"
+                    parts = line.strip().split(",")
+                    if len(parts) >= 2:
+                        interval_str = parts[1].strip()
+                        # ms単位の場合
+                        if "ms" in interval_str.lower():
+                            value = float(interval_str.lower().replace("ms", "").strip())
+                            return value / 1000.0  # ミリ秒→秒に変換
+                        # s単位の場合
+                        elif "s" in interval_str.lower():
+                            value = float(interval_str.lower().replace("s", "").strip())
+                            return value
+        return None
+    except Exception as e:
+        print(f"ERROR in get_sampling_interval_from_header: {e}")
+        print(f"MESSAGE:\n----------\n{traceback.format_exc()}----------")
+        return None
 
 # 関数：キーワードが入っている行の次行番号を検出し、コラム名も取得
 def detect_data_line(path, keyword, offset=1):
@@ -318,19 +347,49 @@ def monitor_threshold(logger_name):
         write_error_log(f'monitor_threshold({logger_name})', traceback.format_exc())
         return
 
-    # 時刻をdatetime形式に変換
-    df_time = pd.to_datetime(df['日付/時間']) + pd.to_timedelta(df['ms'], unit='ms')
-    df = df.drop(['日付/時間', 'ms'], axis=1)
+    # 時刻をdatetime形式に変換し、もとのms列＆日付列を削除し置き換える
+    date_col = None
+
+    # 日付列の検出
+    # GL840シリーズは'日付/時間'と'ms'列、GL800シリーズは'日付 時間'列のみ
+    if '日付/時間' in df.columns:
+        date_col = '日付/時間'
+    elif '日付 時間' in df.columns:
+        date_col = '日付 時間'
+    else:
+        print(f"ERROR -> '日付/時間' or '日付 時間' column not found in CSV file")
+        print(f"Available columns: {df.columns.tolist()}")
+        write_error_log(f'monitor_threshold({logger_name})', f"Date column not found. Available: {df.columns.tolist()}")
+        return
+
+    # ms列がある場合はmsを加算し、ms列＆日付列を削除し置き換える(GL840シリーズなど)
+    if 'ms' in df.columns:
+        df_time = pd.to_datetime(df[date_col]) + pd.to_timedelta(df['ms'], unit='ms')
+        df = df.drop([date_col, 'ms'], axis=1)
+    else:
+        # ms列がない場合、日付列のみを削除し置き換える(GL800シリーズなど)
+        df_time = pd.to_datetime(df[date_col])
+        df = df.drop([date_col], axis=1)
+
     df.insert(0, '日時', df_time)
     #print(df)
 
     # サンプリングレート取得
-    # ms_diff = df['日時'].diff().dropna() # ms列から
-    # sample_interval = 1 if ms_diff.iloc[0] == 0 else ms_diff.iloc[0] / 1000.0  # ms→秒変換
-    if len(df) > 1:
-        sample_interval = (df['日時'].iloc[1] - df['日時'].iloc[0]).total_seconds()
-    else:
-        sample_interval = 1.0 # ログが空欄の場合は仮の値を入れておく(エラー対策)
+    # 優先順位: 1.CSVヘッダーから取得 → 2.時刻差分から計算 → 3.デフォルト値
+    sample_interval = get_sampling_interval_from_header(local_path)
+
+    if sample_interval is None:
+        # ヘッダーから取得できない場合は、時刻差分から計算
+        if len(df) > 1:
+            sample_interval = (df['日時'].iloc[1] - df['日時'].iloc[0]).total_seconds()
+            if sample_interval == 0:
+                # 差分が0秒の場合(同一秒に複数サンプル)は、デフォルト値を使用
+                sample_interval = 1.0
+                print(f"WARNING -> Sampling interval could not be determined accurately. Using default: {sample_interval}s")
+        else:
+            sample_interval = 1.0 # ログが空欄の場合は仮の値を入れておく(エラー対策)
+
+    # print(f"Sampling interval: {sample_interval}s")
 
     # jsonファイル読み込み
     #json_path = os.path.join(local_base_dir, logger_name, f'{logger_name}.json')
@@ -614,8 +673,15 @@ if __name__ == '__main__':
 
             try:
                 print(f"\n[{name}] " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                backup_log(name) # ログファイルのバックアップ
-                monitor_threshold(name) # 閾値監視
+
+                # 1.ログファイルのバックアップ
+                backup_result = backup_log(name)
+
+                # 2.閾値監視
+                if backup_result:
+                    monitor_threshold(name)
+                else:
+                    print(f"WARNING -> Skipping threshold check for {name} (backup failed)")
 
             except Exception as e: # 例外処理
                 print("ERROR: "+str(e))
